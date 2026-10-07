@@ -1,0 +1,19 @@
+services:
+  cs2:
+    image: joedwards32/cs2
+    container_name: cs2
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./cs2-data:/home/steam/cs2-dedicated
+    ports:
+      - "27015:27015/tcp"
+      - "27015:27015/udp"
+      - "27020:27020/udp"   # SourceTV
+    stdin_open: true
+    tty: true
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
