@@ -9,7 +9,10 @@ cs2/
 ├── docker-compose.yml
 ├── .env                 # server settings and secrets (do not commit)
 ├── workshop.sh          # loads the workshop collection after boot
+├── install-mods.sh      # installs/updates Metamod and all plugins
+├── backups/             # addons/ and cfg/ backups made by install-mods.sh
 └── cs2-data/            # game files, mounted at /home/steam/cs2-dedicated
+    ├── pre.sh           # image hook: re-applies the gameinfo.gi patch on every start
     └── game/
         ├── bin/linuxsteamrt64/        # libssl.so.1.1 + libcrypto.so.1.1 go here
         └── csgo/
@@ -23,7 +26,7 @@ cs2/
 - Linux host with Docker and Docker Compose v2
 - 2+ CPU cores (single-thread performance matters most), 4 GB RAM, 60 GB disk
 - A Game Server Login Token (GSLT). Without one the server logs in anonymously, which restricts connections to LAN only and prevents workshop downloads.
-- `rcon-cli` on the host for `workshop.sh` (see [RCON](#rcon))
+- `rcon-cli` on the host for `workshop.sh` (see [RCON From the Command Line](#rcon-from-the-command-line))
 
 ## docker-compose.yml
 
@@ -103,6 +106,8 @@ The first start downloads about 35 GB. Wait until the server finishes starting, 
 docker compose stop cs2
 ```
 
+Steps 2 to 6 are automated by [install-mods.sh](#install-modssh). The manual steps below document what the script does.
+
 ### 2. Install Metamod:Source 2.0
 
 Download the latest Linux build (penguin icon) from https://www.sourcemm.net/downloads.php?branch=master. Skip builds with a faded penguin; their Linux build is unavailable. cs2kz requires build 1459 or later.
@@ -120,7 +125,13 @@ grep -q "csgo/addons/metamod" cs2-data/game/csgo/gameinfo.gi || \
 sed -i '/Game_LowViolence/a\\t\t\tGame\tcsgo/addons/metamod' cs2-data/game/csgo/gameinfo.gi
 ```
 
-CS2 updates overwrite this file. Re-run the command after every update.
+CS2 updates overwrite this file. To re-apply the line automatically, put the same command in `cs2-data/pre.sh`, which the image runs after the SteamCMD update and before the server starts (`install-mods.sh` sets this up):
+
+```bash
+#!/bin/bash
+gi=/home/steam/cs2-dedicated/game/csgo/gameinfo.gi
+grep -q "csgo/addons/metamod" "$gi" || sed -i '/Game_LowViolence/a\\t\t\tGame\tcsgo/addons/metamod' "$gi"
+```
 
 ### 4. Install the Plugins
 
@@ -130,11 +141,15 @@ Install in this order, extracting each into `cs2-data/game/csgo/`.
 |---|---|---|
 | MultiAddonManager v1.6+ | https://github.com/Source2ZE/MultiAddonManager/releases | `*-steamrt3.tar.gz` |
 | SQL_MM v1.3.4.3+ | https://github.com/zer0k-z/sql_mm/releases | `sql_mm-linux-*.tar.gz` |
+| CS2Menus (optional) | Link in the cs2kz README | Linux build (rt3 if offered) |
 | cs2kz | https://github.com/KZGlobalTeam/cs2kz-metamod/releases | `cs2kz-linux-master.tar.gz` |
 
 - **MultiAddonManager** handles KZ sounds, the HUD, and radio menus.
 - **SQL_MM** provides the local database for times and PBs.
+- **CS2Menus** adds HTML menus to cs2kz.
 - **cs2kz** is the KZ plugin itself.
+
+For in-game admin commands, also install CounterStrikeSharp and CS2-SimpleAdmin; see [Admin Plugin](#admin-plugin-counterstrikesharp--cs2-simpleadmin).
 
 ```
 tar -xzf <archive>.tar.gz -C cs2-data/game/csgo/
@@ -217,6 +232,94 @@ To run it on host boot, add this to the crontab (`crontab -e`) of a user in the 
 ```
 
 If Docker restarts a crashed container, the server comes back on dust2. Run `./workshop.sh` again.
+
+## install-mods.sh
+
+Installs or updates Metamod and all plugins in one run. Paste release asset links (the `/releases/download/...` file links) into the variables at the top; empty variables are skipped.
+
+| Variable | Asset |
+|---|---|
+| `METAMOD_URL` | Metamod 2.0 Linux build |
+| `MULTIADDONMANAGER_URL` | `*-steamrt3.tar.gz` |
+| `SQL_MM_URL` | `sql_mm-linux-*.tar.gz` |
+| `CS2MENUS_URL` | CS2Menus Linux build |
+| `CS2KZ_URL` | `cs2kz-linux-master.tar.gz` (first install) or `cs2kz-linux-master-upgrade.tar.gz` (updates) |
+| `COUNTERSTRIKESHARP_URL` | `counterstrikesharp-with-runtime-*-linux-*.zip` (first install) or the regular Linux build (updates) |
+| `SIMPLEADMIN_URL` | CS2-SimpleAdmin release zip |
+| `ADMIN_STEAMID64` | Your SteamID64; written to `admins.json` as root admin if no admins exist yet |
+
+```
+chmod +x install-mods.sh
+./install-mods.sh
+```
+
+The script:
+
+1. Stops the container if it is running.
+2. Backs up `addons/` and `cfg/` to `backups/<timestamp>/`.
+3. Downloads each mod and copies the archive's `addons/` folder into `game/csgo/`, whatever the archive's root layout. CounterStrikeSharp plugin archives without `addons/` go into `addons/counterstrikesharp/plugins/`.
+4. Installs libssl 1.1 if missing, patches `gameinfo.gi`, and sets up the `pre.sh` hook.
+5. Adds the admin to `admins.json`, fixes ownership, then restarts the container and runs `workshop.sh` if the server was running before.
+
+A link to a release page instead of the file is reported as "not an archive". To restore a backup:
+
+```
+docker compose stop cs2
+sudo tar -xzf backups/<timestamp>/csgo-addons-cfg.tar.gz -C cs2-data/game/csgo/
+docker compose start cs2
+```
+
+## Admin Plugin (CounterStrikeSharp + CS2-SimpleAdmin)
+
+Adds chat commands for admins (map changes, kick, ban) without RCON. cs2kz has no map command of its own.
+
+### Components
+
+| Component | Source | Asset |
+|---|---|---|
+| CounterStrikeSharp | https://github.com/roflmuffin/CounterStrikeSharp/releases | `counterstrikesharp-with-runtime-*-linux-*.zip` |
+| CS2-SimpleAdmin | https://github.com/daffyyyy/CS2-SimpleAdmin/releases | Release zip |
+
+- **CounterStrikeSharp** is a .NET plugin framework running as a Metamod plugin. The "with runtime" build bundles .NET; it is only needed on the first install.
+- **CS2-SimpleAdmin** provides the admin commands. Check its README for additional required plugins and install those too.
+
+Install both with `install-mods.sh`, or manually: extract CounterStrikeSharp into `game/csgo/`, and the SimpleAdmin plugin into `game/csgo/addons/counterstrikesharp/plugins/`.
+
+### Admin Permissions
+
+`cs2-data/game/csgo/addons/counterstrikesharp/configs/admins.json`:
+
+```json
+{
+  "owner": {
+    "identity": "7656119XXXXXXXXXX",
+    "flags": ["@css/root"]
+  }
+}
+```
+
+`identity` is your SteamID64 (look it up on steamid.io). `@css/root` grants all permissions. Add more admins as further entries with their own key.
+
+### Database
+
+CS2-SimpleAdmin stores bans and admin actions in a database. Its config is generated on first start at `addons/counterstrikesharp/configs/plugins/CS2-SimpleAdmin/CS2-SimpleAdmin.json`.
+
+- **SQLite:** Experimental, but needs no extra service. Set the database type to SQLite in the config; check the generated file for the exact field.
+- **MySQL/MariaDB:** The supported backend. It requires a database server, e.g. an extra container.
+
+For a private homelab server, SQLite is sufficient. Restart the container after editing the config.
+
+### Verify
+
+```
+meta list          # CounterStrikeSharp listed as loaded
+css_plugins list   # CS2-SimpleAdmin listed as loaded
+```
+
+### Caveats
+
+- **Updates:** CounterStrikeSharp often breaks after CS2 updates until a new build is released. Check its releases page after Valve patches.
+- **ICU errors:** If CounterStrikeSharp fails with an ICU or globalization error in the logs, add `DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1` to `.env` and recreate the container.
 
 ## Connecting
 
@@ -315,16 +418,56 @@ Settings changed in the console reset on restart. Put permanent settings in `cs2
 
 ### cs2kz Chat Commands
 
-Players type these in chat. Run `!help` for the full list. Common ones (names may differ between versions):
+Players type these in chat as `!<name>` or `/<name>`, or bind them as `bind <key> kz_<name>`. `!help` lists everything; `kz_help <category>` lists one category.
 
 | Command | Effect |
 |---|---|
 | `!r` | Restart the run |
 | `!cp` | Save a checkpoint |
-| `!tp` | Teleport to the last checkpoint |
-| `!mode` | Change the movement mode |
-| `!map <name>` | Change map |
-| `!spec` | Go to spectator |
+| `!tp` | Teleport to the current checkpoint |
+| `!undo` | Undo the last teleport |
+| `!pause` | Pause or resume the timer |
+| `!stop` | Stop the timer |
+| `!end` | Teleport to the end |
+| `!course` | List courses or teleport to one |
+| `!mode` | List or change the movement mode (`!vnl`, `!ckz`) |
+| `!style` | List or toggle styles |
+| `!pb` / `!wr` / `!ctop` | Personal best, records, map top times |
+| `!replay` | Play a replay |
+| `!hide` | Hide other players |
+| `!noclip` | Toggle noclip |
+| `!spec` | Spectate a player |
+| `!lj` | Teleport to the jumpstat area |
+| `!js` | Toggle jumpstats |
+| `!measure` | Measure distances |
+| `!options` | Preferences menu |
+
+cs2kz has no map change command; use the admin commands below or RCON.
+
+### Admin Chat Commands (CS2-SimpleAdmin)
+
+Requires the [admin plugin](#admin-plugin-counterstrikesharp--cs2-simpleadmin) and an entry in `admins.json`. `!admin` lists all commands available to you.
+
+| Command | Effect |
+|---|---|
+| `!wsmap <name or id>` | Change to a workshop map |
+| `!map <name>` | Change to a stock map |
+| `!kick <#userid or name> [reason]` | Kick a player |
+| `!ban <#userid or name> [minutes] [reason]` | Ban a player (0 = permanent) |
+| `!players` | List players |
+| `!admin` | Show admin commands |
+
+### Map Changes Without the Admin Plugin
+
+To change maps from in game over RCON, add this to your client's `game/csgo/cfg/autoexec.cfg` (with `+exec autoexec` in the Steam launch options):
+
+```
+rcon_password "your_rcon_pw"
+alias maps "rcon ds_workshop_listmaps"
+alias map "rcon ds_workshop_changelevel"
+```
+
+Then type `maps` or `map <mapname>` in the console. Server commands typed without the `rcon` prefix fail with "not marked FCVAR_CLIENT_CAN_EXECUTE".
 
 ## Updating
 
@@ -332,13 +475,15 @@ Players type these in chat. Run `!help` for the full list. Common ones (names ma
 
 The image runs a SteamCMD update on every container start, including `docker compose start`, so updates cannot be skipped by stopping and starting. After a CS2 update:
 
-1. Re-apply the gameinfo.gi line.
-2. Check `meta list`. Major Valve updates often break cs2kz until it releases a new build; Metamod usually survives minor patches.
-3. Watch the cs2kz GitHub releases for fixes.
+1. The `pre.sh` hook re-applies the gameinfo.gi line. Without it, re-apply the line manually.
+2. Check `meta list` and `css_plugins list`. Major Valve updates often break cs2kz until it releases a new build; Metamod usually survives minor patches.
+3. Watch the cs2kz and CounterStrikeSharp GitHub releases for fixes, and install them with `install-mods.sh`.
 
 Clients on a newer CS2 version cannot join an outdated server, so updates cannot be postponed for long.
 
 ### Plugins
+
+Paste the new links into `install-mods.sh` (leave unchanged mods empty) and run it. It backs up `addons/` and `cfg/` first. To update manually:
 
 ```
 docker compose stop cs2
@@ -348,7 +493,8 @@ docker compose start cs2
 ```
 
 - **cs2kz upgrades:** Use `cs2kz-linux-master-upgrade.tar.gz` for updates, so your configs are not overwritten.
-- **Back up configs:** For other plugins, back up any edited configs in `addons/` and `cfg/` first, since extracting can overwrite them.
+- **CounterStrikeSharp updates:** Use the regular build, not "with runtime", unless the release notes say the .NET runtime changed.
+- **Back up configs:** When updating manually, back up any edited configs in `addons/` and `cfg/` first, since extracting can overwrite them.
 - **Stale files:** Extracting does not remove obsolete files. If something behaves oddly, delete the plugin's folder and reinstall cleanly.
 - **Isolating a broken plugin:** To disable a plugin temporarily, move its `.vdf` out of `addons/metamod/`.
 
@@ -382,6 +528,9 @@ docker inspect cs2 --format 'tty={{.Config.Tty}} stdin={{.Config.OpenStdin}}'
 
 | Symptom | Cause | Fix |
 |---|---|---|
+| `!map`/`!wsmap` unknown | CounterStrikeSharp or CS2-SimpleAdmin not loaded | Check `meta list` and `css_plugins list` |
+| Admin commands say no permission | SteamID missing from `admins.json` | Add your SteamID64 with `@css/root`; restart or run `css_reloadadmins` |
+| "not marked FCVAR_CLIENT_CAN_EXECUTE" | Server command typed in client console | Prefix with `rcon` |
 | `connect` times out | No map loaded (`Loading map "<empty>"`) | Set `CS2_STARTMAP`, unset the workshop variables |
 | `connect` times out from another network | Anonymous logon restricts the server to LAN | Set `SRCDS_TOKEN` |
 | `libssl.so.1.1: cannot open shared object file` | OpenSSL 1.1 missing | [Setup step 5](#5-add-openssl-11) |
