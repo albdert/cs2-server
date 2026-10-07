@@ -10,6 +10,10 @@ MULTIADDONMANAGER_URL=""   # steamrt3 build
 SQL_MM_URL=""
 CS2MENUS_URL=""
 CS2KZ_URL=""               # full package on first install, -upgrade package for updates
+COUNTERSTRIKESHARP_URL=""  # linux "with-runtime" build on first install, regular build for updates
+SIMPLEADMIN_URL=""         # CS2-SimpleAdmin release zip
+
+ADMIN_STEAMID64=""         # your SteamID64 (7656119...), added to CSS admins.json as root
 
 LIBSSL_DEB_URL="http://deb.debian.org/debian/pool/main/o/openssl/libssl1.1_1.1.1w-0+deb11u1_amd64.deb"
 CONTAINER="cs2"
@@ -35,7 +39,7 @@ SUDO=""
 [[ $EUID -ne 0 ]] && SUDO="sudo"
 
 install_mod() {
-  local name=$1 url=$2
+  local name=$1 url=$2 fallback=${3:-}
   [[ -z $url ]] && return 0
 
   local archive="$TMP/$name.archive" extract="$TMP/$name"
@@ -51,10 +55,42 @@ install_mod() {
 
   local src
   src=$(find "$extract" -type d -name addons -printf '%d %h\n' | sort -n | head -1 | cut -d' ' -f2-)
-  [[ -n $src ]] || die "$name: no addons/ directory found in archive"
+  if [[ -n $src ]]; then
+    log "$name: installing to game/csgo/"
+    $SUDO cp -a "$src/." "$CSGO/"
+    return 0
+  fi
 
-  log "$name: installing to game/csgo/"
-  $SUDO cp -a "$src/." "$CSGO/"
+  [[ -n $fallback ]] || die "$name: no addons/ directory found in archive"
+  if [[ -d $extract/plugins || -d $extract/shared ]]; then
+    log "$name: installing to $(dirname "${fallback#$DATA/}")/"
+    $SUDO cp -a "$extract/." "$(dirname "$fallback")/"
+    return 0
+  fi
+  local top=("$extract"/*)
+  [[ ${#top[@]} -eq 1 && -d ${top[0]} ]] || die "$name: expected a single plugin folder in archive"
+  log "$name: installing to ${fallback#$DATA/}/$(basename "${top[0]}")"
+  $SUDO mkdir -p "$fallback"
+  $SUDO cp -a "${top[0]}" "$fallback/"
+}
+
+install_css_admin() {
+  local admins="$CSGO/addons/counterstrikesharp/configs/admins.json"
+  [[ -n $ADMIN_STEAMID64 && -d $(dirname "$admins") ]] || return 0
+  grep -q "$ADMIN_STEAMID64" "$admins" 2>/dev/null && return 0
+  if grep -q '"identity"' "$admins" 2>/dev/null; then
+    warn "admins.json already has admins; add $ADMIN_STEAMID64 manually"
+    return 0
+  fi
+  log "admins.json: adding $ADMIN_STEAMID64 as root admin"
+  $SUDO tee "$admins" >/dev/null <<EOF
+{
+  "owner": {
+    "identity": "$ADMIN_STEAMID64",
+    "flags": ["@css/root"]
+  }
+}
+EOF
 }
 
 install_libssl() {
@@ -113,7 +149,10 @@ install_mod multiaddonmanager "$MULTIADDONMANAGER_URL"
 install_mod sql_mm "$SQL_MM_URL"
 install_mod cs2menus "$CS2MENUS_URL"
 install_mod cs2kz "$CS2KZ_URL"
+install_mod counterstrikesharp "$COUNTERSTRIKESHARP_URL"
+install_mod simpleadmin "$SIMPLEADMIN_URL" "$CSGO/addons/counterstrikesharp/plugins"
 
+install_css_admin
 install_libssl
 patch_gameinfo
 install_prehook
